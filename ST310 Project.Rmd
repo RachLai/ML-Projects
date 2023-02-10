@@ -1,0 +1,1187 @@
+---
+title: "ST310-project"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+
+output: 
+  html_document: 
+    theme: readable
+    highlight: pygments
+    keep_md: yes
+    code_download: true
+    toc: true
+    toc_float: true
+    
+---
+
+## Introduction
+
+
+With the rapid growth of sharing economies, AirBnB has become a brilliant opportunity for homeowners to utilise their properties as a source of income. In Los Angeles alone, over 32000 properties were listed in October 2021 - that is over 25 listings per kilometer squared! However, there are also challenges that come with the flexibility offered by AirBnB. In order to withstand the fierce competition and attract travellers, hosts have to make informed decisions about how to price their listings. 
+
+
+
+## Dataset description:
+
+The original dataset contains ~32000 listings in the Greater Los Angeles area in the US and was sourced from Inside AirBnB. After some initial pre-processing, 34 features were extracted to be used as candidate predictor variables for price prediction. The predictors were of multiple data types, namely numeric, character, and categorical. Once relevant information was extracted from the text variables, they were dropped since this project does not include Natural Language Processing or sentiment analysis. Broadly, the retained features contain information on the host's activity on AirBnB (e.g. number of listings, whether or not the host has is a super-host, and their response time), the location of the property (e.g. neighbourhood group), the size of the property (e.g. number of bedrooms and bathrooms), reviews, and availability. Several predictor variables were also added in the process of feature engineering.
+
+
+## Project description:
+
+
+In this project, we will train several machine learning models to predict nightly listing prices using various characteristics of the properties. Where necassary, the model's parameters will be tuned using cross-validation. The predictive performance of each model will be evaluated on held-out test data.
+
+
+
+## Methodology / workflow:
+1. Initial inspection
+2. Data Cleaning
+3. Variable pre-processing
+4. Feature Engineering
+5. Exploratory Data Analysis
+6. Modelling
+
+
+1. Initial inspection to learn mode about the dataset
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# Loading necessary libraries
+
+library(tidyverse)
+#library(plyr)
+library(rsample)
+library(parsnip)
+library(recipes)
+library(yardstick)
+library(workflows)
+library(geosphere)
+library(reshape2)
+library(broom)
+library(keras)
+
+```
+
+
+
+Begin by loading the dataset and observing the structure:
+
+```{r, echo = FALSE}
+# Loading listings dataset
+data <- read_csv("los_angeles_airbnb.csv")
+```
+
+
+```{r}
+# Exploring the first few listings
+head(data)
+```
+
+
+```{r}
+# Checking the dimensions of the dataframe
+dim(data)
+```
+
+
+```{r}
+# Checking variable types 
+glimpse(data)
+```
+
+
+
+2. Data cleaning:
+
+From the output of the glimpse function, we observe that some variables contain missing values and some would benefit from pre-processing before being used for modelling. The following steps will be carried out to handle such issues:
+
+
+- Removing duplicated entries
+- Removing redundant features
+- Handling missing values
+- Getting variables into the correct format
+- Identifying and treating outliers
+
+
+
+```{r}
+# Dropping any duplicated listings to ensure all rows are unique 
+data <- unique(data)
+```
+
+Throughout this data cleaning process, the goal is to keep as many observations as possible. This is to minimise the standard errors and confidence intervals of coefficient estimates for the true population, ensuring they are as precise as possible. Therefore, we will first remove redundant columns and then focus on treating the missing values in variables that are more likely to contribute to model performance.
+
+
+
+Many of the variables in the dataset contain information about the scrapping procedure and the host rather than the property itself, and thus have no predictive power. They will be removed to avoid fitting a model on noise in the training data. We will also remove any private information about the host for ethical reasons. Some columns (e.g. host_listings_count and host_total_listings_count) also appear to have duplicated information, so these will be removed too. The information contained in some character type variables (e.g. description) is too complex to be extracted with methods other than NLP, and would add very little to the model as it is. 
+
+
+```{r}
+#Dropping redundant variables using dplyr's select function
+data <- data %>%
+  select(-c("id", "name", "description", "listing_url", "scrape_id", "last_scraped", "picture_url", "host_id", "host_url", "host_name", "host_location", "host_about", "host_thumbnail_url", "host_picture_url", "host_neighbourhood", "host_listings_count", "host_verifications", "neighbourhood", "neighborhood_overview", "first_review", "last_review", "calendar_last_scraped", "calendar_updated", "license", "minimum_minimum_nights", "maximum_minimum_nights", "minimum_maximum_nights", "maximum_maximum_nights", "minimum_nights_avg_ntm", "maximum_nights_avg_ntm", "calculated_host_listings_count", "calculated_host_listings_count_entire_homes", "calculated_host_listings_count_private_rooms", "calculated_host_listings_count_shared_rooms", "availability_30", "availability_60", "availability_90", "number_of_reviews_ltm", "number_of_reviews_l30d"))
+```
+
+
+We will now proceed to examining the missing values of different predictor variables to identify suitable methods of treating them
+
+```{r}
+# In some variables, the missing values are in character format => "N/A"
+# Replacing character NAs to correctly calculate number of missing values
+data[data == "N/A"] <- NA
+```
+
+
+```{r}
+# Checking the number of missing values in each column
+sort(colSums(is.na(data)))
+```
+
+Potential ways of treating the missing values in each variable:
+ 
+
+- Review scores: 
+Upon closer inspection of the dataframe, it seems that the missing values in variables containing review information mostly appear in the same listings. We can also see that 7919 of the 8271 missing values have no reviews and miss information about the host's acceptance and response rate. These listings will therefore be removed. 
+
+
+```{r}
+# Checking for missing information in other columns when review_score_value is NA
+data %>%
+  group_by(is.na(review_scores_value))%>%
+  summarise(no_reviews = sum(number_of_reviews == 0))
+```
+
+```{r}
+# Dropping rows with NAs in review scores
+data <- data %>%
+  drop_na(review_scores_value)
+```
+
+
+- Host profile information:
+The 9 missing values in host_has_profile_pic, host_is_superhost and host_identity_verified also all come from the same listings
+
+```{r}
+# Removing NAs in host profile variables:
+data <- data %>%
+  drop_na(host_since)
+```
+
+
+- Host response/acceptance rates:
+We will interpret the missing values in host response and acceptance rate as the host simply not accepting or responding any request/messages => NAs can be replaced with 0%
+
+
+- Host reponse times:
+NA response times are replaced with "a few days or more" which is the latest reply setting on Airbnb
+
+```{r}
+data <- data %>%
+  mutate(host_response_rate = replace_na(host_response_rate, 0),
+         host_acceptance_rate = replace_na(host_acceptance_rate, 0),
+         host_response_time = replace_na(host_response_time, "a few days or more"))
+
+```
+
+Note that since over 1000 values were replaced with 0s, there is not much variability in those columns. This might result in these predictor variables not being statistically significant since standard error of the estimates will likely be high, resulting in a small t-statistic and high p-values.
+
+
+
+
+- Bathrooms:
+There are only 31 missing values in bathrooms, so we will remove these:
+
+```{r}
+data <- data %>%
+  drop_na(bathrooms)
+```
+
+
+- Bedrooms and beds:
+
+We will use deterministic regression imputation to approximate the missing values in the beds variable by regressing it on the number of people the property accommodates and number of bathrooms. This method fits a linear regression model between the target variable and predictors, and imputes the NAs with the model's predictions. One benefit of this method over mean or zero imputation is that it preserves the correlation between variables. Stochastic imputation will not be used since both beds and bedrooms are discrete, and hence adding a random error term to the prediction will not be helpful.The adjusted R^2 of 0.70 supports the linear relationship between those variables.
+
+Before performing the regression, we need to pre-process the bathrooms variable as it contains characters. Half-baths will be counted as 0.5 a bathroom.
+
+```{r}
+data <- data %>%
+  mutate(bathrooms = replace(bathrooms, bathrooms %in% c("Shared half-bath", "Private half-bath", "Half-bath"), 0.5),
+         bathrooms = gsub('[a-z]', "", bathrooms),
+         bathrooms = gsub(' ', "", bathrooms),
+         bathrooms = as.numeric(bathrooms))
+```
+
+The process will then be repeated to impute bedrooms.
+
+```{r}
+# Creating a linear model regressing the number of beds on the number of people the property accommodates
+reg_impute_beds <- lm(beds ~ accommodates + bathrooms, data = data)
+
+
+#Imputing beds
+data <- data %>%
+  mutate(bed_preds = round(predict(reg_impute_beds, .))) %>%
+  mutate(beds = ifelse(is.na(beds), bed_preds, beds)) %>%
+  select(-bed_preds)
+
+#Creating a linear model regressing the number of bedrooms on the number of people accommodated, beds and bathrooms
+reg_impute_bedrooms <- lm(bedrooms ~ accommodates + beds + bathrooms, data = data)
+
+
+#Imputing bedrooms
+data <- data %>%
+  mutate(bedroom_preds = round(predict(reg_impute_bedrooms, .)))%>%
+  mutate(bedrooms = ifelse(is.na(bedrooms), bedroom_preds, bedrooms)) %>%
+  select(-bedroom_preds)
+
+#Final check for NAs
+sort(colSums(is.na(data)))
+```
+
+
+3. Variable pre-processing
+
+Some variables could be re-formatted to better expose the structure of the data and be suitable for modelling.
+
+
+host_since: 
+We could simply reduce this to the year when the host joined AirBnB, as the day and month are likely to be redundant 
+
+```{r}
+data$host_since <- as.numeric(format(as.Date(data$host_since, format="%d/%m/%Y"),"%Y"))
+```
+
+
+
+host_response_rate and host_acceptance_rate: 
+Strip the values of percentage sign and convert to numeric
+
+```{r}
+data <- data %>%
+  mutate(across(c(host_response_rate, host_acceptance_rate), ~gsub('[\\%,]', "", .) %>% as.numeric))
+```
+
+
+host_response_time, host_is_superhost, etc.:
+Converting these from character to categorical will enable us to compare the effect of each level on prices to a baseline level.
+
+```{r}
+data <- data %>%
+  mutate(across(c(host_response_time, host_is_superhost, host_has_profile_pic, host_identity_verified, neighbourhood_group_cleansed, room_type, has_availability, instant_bookable), factor))
+```
+
+
+
+price:
+Removing $ and , from prices and converting to numerical
+
+```{r}
+data$price <- as.numeric(gsub('[\\$,]', "", data$price))
+```
+
+
+Neighbourhood_cleansed:
+Grouping neighbourhoods with less than 100 listings into "Others" to avoid making models too complex
+
+```{r}
+# Checking the number of listings in each neighbourhood
+data%>%
+  group_by(neighbourhood_cleansed) %>%
+  tally()
+
+
+data <- data %>%
+  add_count(neighbourhood_cleansed)%>%
+  mutate(neighbourhood_cleansed = factor(ifelse(n < 100, "Other", neighbourhood_cleansed)))%>%
+  select(-n)
+
+```
+
+
+Property_type:
+Similarly, grouping property types with less than 7 listings into "Other"
+
+```{r}
+data <- data %>%
+  add_count(property_type)%>%
+  mutate(property_type = factor(ifelse(n < 7, "Other", property_type)))%>%
+  select(-n)
+```
+
+
+
+
+- Outlier detection:
+
+- Remove outliers in price, property_type, neighbourhood_cleansed, bathrooms, bedrooms etc
+
+This an important stage for linear models since influential points (e.g. high leverage) can affect the slope of the OLS line and hence the size of coefficients. We will visualise some variables using boxplots to identify potential outliers.
+
+
+```{r}
+summary(data$price)
+```
+Maximum price is 10k which seems to be an unrealistic per night price, however some listings are large villas and castles accommodating 10+ individuals, so some high prices might be justified. Airbnb also recently introduced an AirBnB Lux feature which lists high-end properties, priced in the 5k-10k range. Thus, we will set a cut off point of 5000 and then perform a log transformation of prices to correct the strong positive skew and allow for better visualisations.
+
+```{r}
+#Boxplot for prices:
+ggplot(data, aes(price)) + geom_boxplot()
+```
+
+As confirmed by the boxplot, there are very few observations above $3000.
+
+```{r}
+data <- data %>%
+  filter(price <= 3000)
+```
+
+
+```{r}
+
+#Checking the distribution of prices before log transformation
+before_log <- ggplot(data, aes(x = price)) +
+  geom_histogram(binwidth = 300, color = "black", fill = "white", alpha = 0.5) 
+
+
+#Performing log transformation:
+after_log <- ggplot(data, aes(x = log(price))) + 
+  geom_histogram(binwidth = 0.3, color = "black", fill = "green", alpha = 0.3)
+
+gridExtra::grid.arrange(before_log, after_log, ncol = 2)
+```
+
+
+```{r}
+#Adding the log transformed price variable to the dataframe
+data <- data %>%
+  mutate(log_price = log(price))
+```
+
+
+
+Upon closer inspection of other variables, we notice that there is only one property with 50, 12, 11 and 10 rooms and the corresponding prices seem to be anomalous (the 50 bedroom flat is $197 per night => room in a hotel), so it might be best to remove these as they might be high leverage points.
+
+
+```{r}
+data %>% 
+  group_by(bedrooms)%>%
+  tally()
+```
+
+```{r}
+data <- data %>%
+  filter(bedrooms < 10)
+```
+
+
+
+
+
+4. Feature engineering
+
+- Making changes to amenities:
+As it is now, the amenities variable is not very informative since the amenities in each proprty are in a list and vary too much to be considered categorical. We will use domain knowledge to estimate which amenities are likely to be valued by travellers and create binary variables showing the presence or absence of this amenity.
+
+
+```{r}
+# Creating new binary variables representing the presence of a certain amenity
+data <- data %>%
+  mutate(has_pool = ifelse(grepl("Pool", amenities, ignore.case = T), 1, 0),
+         has_kitchen = ifelse(grepl("kitchen", amenities, ignore.case = T), 1, 0),
+         has_balcony = ifelse(grepl("balcony", amenities, ignore.case = T), 1, 0),
+         has_parking = ifelse(grepl("parking", amenities, ignore.case = T), 1, 0),
+         has_tv = ifelse(grepl("TV", amenities, ignore.case = T), 1, 0))
+
+```
+
+
+*****************************************************************
+
+
+- Latitude and longitude by themselves have little value => could use this information to find the distance from Central LA
+
+```{r}
+
+# Create a function measuring distance to different locations in LA:
+distance_calculator_la <- function(long, lat, la_long, la_lat){
+  central_la_coords <- c(la_long, la_lat)
+  listing_coords <- c(long, lat)
+  return(distm(listing_coords, central_la_coords, fun = distHaversine)/1000)
+}
+
+#Adding a columns showing distance to central LA in km
+data$distance_to_center <- round(apply(data[,c("longitude", "latitude")], 1, function(x) distance_calculator_la(x["longitude"], x["latitude"], -118.322816, 34.068675)), 2)
+
+
+#Adding a column showing distance to Malibu beach
+data$distance_to_malibu <- round(apply(data[,c("longitude", "latitude")], 1, function(x) distance_calculator_la(x["longitude"], x["latitude"], -118.779757, 34.025921)), 2)
+
+```
+
+
+
+## Exploratory Data Analysis to choose features for baseline model
+
+In this section we will be visualising individual features and correlations between them and price through univariate and bivariate visualisations to identify which features are more likely to contribute to the baseline model.
+
+
+- Location variables:
+
+
+First, let's check the how prices vary across LA regions by creating a scatterplot using the longitude and latitude variables. The plot seems to confirm our reasoning behind adding the distance features in the previous section, since the more expensive listings are located closer to the center and the Malibu coast. 
+
+```{r}
+ggplot(data, aes(longitude, latitude, color = log_price)) + geom_point(alpha = 0.4)
+```
+
+
+Additionally, we can group the data by neighborhood and observe whether there is a significant difference in mean prices
+
+```{r}
+data %>%
+  group_by(neighbourhood_cleansed) %>%
+  summarise(mean_price = round(mean(price), 0)) %>%
+  arrange(desc(mean_price))%>%
+  data.frame()%>%
+  head(10)
+
+```
+
+
+However, using neighbourhood_group_cleansed instead, there does not appear to be a stark difference between the groups, so we will exclude this variable from the model:
+
+```{r}
+ggplot(data, aes(neighbourhood_group_cleansed, log_price)) + geom_boxplot(alpha = 0.5)
+```
+
+
+Finally, assessing the correlation between distance to malibu and prices:
+
+```{r}
+ggplot(data, aes(distance_to_malibu, log_price)) + 
+  geom_point(size = 0.5) + 
+  geom_smooth(method = lm)
+```
+
+
+
+- House characteristics variables:
+
+Examining the correlation between bedrooms, beds, and bathrooms with price:
+
+```{r}
+bedrooms <- ggplot(data, aes(bedrooms, log_price)) + geom_point(size = 1) + geom_smooth(method=lm) 
+
+beds <- ggplot(data, aes(beds, log_price)) + geom_point(size = 1) + geom_smooth(method=lm)
+
+bathrooms <- ggplot(data, aes(bathrooms, log_price)) + geom_point(size = 1) + geom_smooth(method=lm)
+
+gridExtra::grid.arrange(bedrooms, beds, bathrooms, ncol = 3)
+```
+
+
+Inspecting the relationship between room_type and prices:
+
+```{r}
+ggplot(data, aes(room_type, log_price)) + geom_boxplot(color = "black", fill = "lightblue", alpha = 0.5)
+```
+
+
+
+A final look at property types:
+
+```{r}
+ggplot(data, aes(property_type, log_price)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 45, size = 6))
+```
+
+Examining the correlation with selected amenities
+
+```{r}
+tv <- ggplot(data, aes(has_tv, log_price)) + geom_boxplot(color = "black", fill = "lightblue", alpha = 0.5)
+
+balcony <- ggplot(data, aes(has_balcony, log_price)) + geom_boxplot(color = "black", fill= "lightblue", alpha = 0.5)
+
+kitchen <- ggplot(data, aes(has_kitchen, log_price)) + geom_boxplot(color = "black", fill = "lightblue", alpha = 0.5)
+
+pool <- ggplot(data, aes(has_pool, log_price)) + geom_boxplot(color = "black", fill = "lightblue", alpha = 0.5)
+
+
+gridExtra::grid.arrange(tv, balcony, kitchen, pool, ncol = 2)
+
+```
+
+
+
+- Examining the correlation matrix for numeric features to avoid including features that are highly correlated (multicollinearity)
+
+
+```{r fig.width=12,fig.height=10}
+
+correlation_mat <- melt(round(cor(data[, sapply(data, is.numeric)]),2))
+
+#Using the Pearson correlation matrix to create a heatmap 
+ggplot(data = correlation_mat, aes(Var2, Var1, fill = value))+
+  geom_tile(color = "white") +
+  scale_fill_gradient2(low = "blue", high = "red", midpoint = 0, limit = c(-1,1), space = "Lab", name="Correlation") +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, size = 8, hjust = 1)) +
+  geom_text(aes(Var2, Var1, label = value), color = "black", size = 3.5)
+```
+
+There is a strong correlation between host acceptance and response rates, therefore one will be excluded from the model.
+Review scores correlated too.
+
+
+6. Modelling:
+
+
+a) Baseline model:
+
+We will now proceed with building two baseline models (parametric: multiple linear regression and non-parametric: KNN) using a few of the predictors we have identified as being likely to be statistically significant. This creates scope for comparing the performance of the more complex models we will develop later in the file.
+
+Both models will be tried out since while making stable predictions, linear regression makes strong assumptions about the nature of relationships between errors, predictors and the outcome, which might lead to these predictions being inaccurate. On the contrary, since it is not generative but rather uses the geometric idea of nearness, KNN does not assume a parametric form for f(X), but often does not produce stable predictions.
+
+
+
+Prior to building these models, we will use tidymodels' rsample package to split the data into train and test sets:
+
+```{r}
+# Creating initial split
+data_split <- initial_split(data, prop = 0.70)
+
+# Creating traind and test datasets 
+train <- training(data_split)
+test <- testing(data_split)
+```
+
+The same split of data will be used for the rest of the models to ensure that the models are trained and evaluated on the same observations.
+
+
+We will now create a recipe for pre-processing variables for the baseline models. The recipe will be computed using the train data and then applied to the test data, keeping the same transformation weights.
+
+
+```{r}
+
+recipe <- train %>%
+  # defining the regression formula
+  recipe(log_price ~ .) %>% 
+  # removing irrelevant variables
+  step_rm(longitude, latitude, amenities, neighbourhood_group_cleansed) %>% 
+  # Removing any highly correlated predictors
+  step_corr(all_numeric(), -all_outcomes()) %>%
+  # Convert multi-level categorical variables into dummies
+  # step_dummy(c(neighbourhood_cleansed, room_type, property_type)) %>%
+  prep()
+
+#Applying transformations to train data
+train <- juice(recipe)
+
+#Applying same transformations to test data
+test <- recipe %>%
+  bake(test)
+
+
+```
+
+Creating a function that prints various performance metrics:
+
+```{r}
+performance_metrics <- function(actual_log, actual_price, pred) {
+  rmse = round(mean((exp(pred) - actual_price)**2)**0.5, 2)
+  mape = round(Metrics::mape(actual_log, pred)*100, 2)
+  mape_price = round(Metrics::mape(actual_price, exp(pred))*100, 2)
+  #adj_r2 = round(glance(model)$adj.r.squared, 3)
+  rss <- sum((pred - actual_log) ** 2)
+  tss <- sum((actual_log - mean(actual_log)) ** 2)  ## total sum of squares
+  oos_r2 <- round(abs(1 - rss/tss), 4)
+  print(paste("Root Mean Squared Error in dollars: ", rmse))
+  print(paste0("Mean Absolute Percentage Error log_price: ", mape, "%"))
+  print(paste0("Mean Absolute Percentage Error price: ", mape_price, "%"))
+  print(paste("Out of sample R-squared (test data): ", oos_r2))
+}
+```
+
+As seen in the above function, we will be using Root Mean Squared Error to evaluate the prediction error, and (adjusted) R squared to examine model fit (i.e. what proportion of variation in prices are explained by the predictors). 
+
+For models that require parameter optimisation, RMSE or MSE will be used as the loss function in cross validation.
+
+
+
+Best subset selection
+
+
+
+
+1. Multiple Linear Regression:
+
+Explanation:
+Multiple linear regression utilises the OLS approach to calculate the coefficients ($\hat{\beta_i}$, i = 1,2,...,p) of the predictors. This approach aims to minimise the sum of squared residuals. i.e. 
+$RSS =\sum_i(y_i - \hat{y_i})^2 = \sum_i(y_i - \hat{\beta_0} - \hat{\beta_1}x_{i1} - ... - \hat{\beta_p}x_{ip})$ 
+where $ \hat{y} = \hat{\beta_0} + \hat{\beta_1}x_{1} +... + \hat{\beta_p}x_{p}  $ is the fitted model.
+
+Each coefficient is interpreted as the average effect of changing that coefficient on the response variable, keeping all other independent variables constant.
+
+```{r}
+
+# Creating an tidymodels interface that uses the lm package as an engine 
+mlr <- linear_reg(penalty = NULL) %>%
+  set_engine("lm") %>%
+  fit(log_price ~ bedrooms + room_type + property_type + neighbourhood_cleansed + has_balcony + host_is_superhost + availability_365 + has_pool + distance_to_malibu, train)
+
+
+#Checking variable significance:
+tidy(mlr)
+glance(mlr)
+
+```
+
+```{r}
+#Making predictions on the test data:
+preds_mlr <- predict(mlr, test)
+
+
+#Checking adjusted r squared:
+glance(mlr)$adj.r.squared
+
+# Checking performance:
+performance_metrics(test$log_price, test$price, preds_mlr$.pred)
+
+```
+
+
+
+
+Result interpretation:
+
+- First, we might want to formulate a hypothesis to check whether at least one of the predictors is significant for predicting prices, i.e.
+$ H_0: \beta_{p-q+1} = \beta_{p-q+2} = ... = \beta_p$ (where q is a subset of p predictors)
+$ H_a: at \ least \ one \ \beta_j \ is \ non-zero$ 
+
+For this, we can examine the F-statistic. This is important to check for since, especially in with a large number of preditors, there is a ~5% probability that any individual predictor will have a p-value below 0.05 despite the absence of a true association of any predictor with the response variable. In this model, this is 309.3 with 126 and 16046 degrees of freedom, which is much larger than 1 and as confirmed by the very small p-value, there is enough evidence at even 1% significance level to reject the null hypothesis and suggest that the model is not entirely useless.
+
+- Let's have a look at the significance of individual coefficients now.
+This is checked using their t-statistic and the corresponding p-value, which show the partial effect of adding that predictor to the model.
+. All continuous variables appear to be highly significant at 1% significance level. Some of the predictors with the largest AVERAGE effect on prices were the number of bedrooms (with one additional bedroom increasing log price by 0.35), and whether a property has a pool (if yes, then log price is 0.22 units higher). 
+
+. With categorical variables, R automatically creates dummy variables, choosing one of the levels as the baseline for comparison. Taking room_type as an example, if we were to run a regression of log_price on room_type only, where entire homes are the baseline level, this would look as follows:
+$log(price) = \beta_o \ + \ \beta_1 Hotel \ room_{i1} \ + \ \beta_2 Private \ room_{i2} \ + \ \beta_3 Shared \ room_{i3} + \epsilon_i$
+
+$\beta_0$ would be the average log price of an entire home. All other coefficients are interpreted as the difference between the average log price for entire homes and that specific room type. In this case, private rooms and shared rooms are priced 3.72 and 7.87 units lower than an entire house, respectively. 
+
+We also observe that some levels of property_type and neighbourhood_cleansed are insignificant, however, since we cannot eliminate individual levels and most levels are statistically significant, we will keep them in the baseline model.
+
+- Evaluating performance:
+
+
+
+
+2. (Unweighted) K Nearest Neighbors:
+
+
+Model explanation:
+
+Given a distance metric (e.g. Euclidean distance) and an integer K, KNN takes a test point $x_0$ and identifies those observations in the training data closest to $x_0$ in the input space (this set of points is called $Ν_0$). In a regression setting, $\hat{f}(x_0)$ is estimated to be the average of the responses of the training points in $Ν_0$
+
+There is a bias-variance tradeoff associated with the choive of optimal K. If too large, the regions in the predictor space with constant predictions will be much smaller, achieving a smoother fit, which results in higher bias but lower variability. If it's too small, the regions with constant predictions will be much greater, and while this results in low bias, there will be high variability since predictions in each region depend on very few observations. In this section, we will be using k-fold cross validation and a grid search to choose the optimal value of K.
+
+Since KNN is impractical when the number of predictors is large, we will be using a smaller subset to fit the model.
+
+
+Using the same data split to create test and train data:
+
+```{r}
+train_knn <- training(data_split)
+test_knn <- testing(data_split)
+```
+
+Creating a recipe to prepare data for KNN modelling:
+
+```{r}
+recipe_knn <- train_knn %>%
+  recipe(log_price ~ .) %>%
+  # removing irrelevant variables
+  step_rm(longitude, latitude, amenities, price, host_since, host_response_time, host_response_rate, host_total_listings_count, host_has_profile_pic, neighbourhood_group_cleansed, bathrooms, has_availability, review_scores_rating, review_scores_accuracy, review_scores_communication, review_scores_value, reviews_per_month, property_type, neighbourhood_cleansed) %>% # removing irrelevant variables
+  step_dummy(all_nominal()) # converting categorical variables to dummies
+```
+
+Building the KNN model:
+
+```{r}
+knn <- nearest_neighbor(
+  mode = "regression",
+  engine = "kknn", 
+  neighbors = tune()
+)
+```
+
+Creating a workflow to streamline the process:
+
+```{r}
+library(workflows)
+workflow_knn <- workflow() %>%
+    add_model(knn) %>%
+    add_recipe(recipe_knn)
+```
+
+Tuning the number of neighbors using 5-fold cross validation which selects the K value which achieves lowest validation RMSE:
+
+```{r}
+library(tune)
+library(kknn)
+best_param_knn <- workflow_knn %>% 
+    tune_grid(resamples = vfold_cv(train_knn, v = 5, strata = log_price, nbreaks = 5),
+              grid = tibble(neighbors = seq(15, 21)),
+              control = control_grid(verbose = TRUE, save_pred = TRUE),
+              metrics = metric_set(rmse))%>%
+    select_best("rmse")
+```
+
+
+Finalising model with optimal parameter:
+
+```{r}
+final_knn <- finalize_workflow(workflow_knn, best_param_knn) %>%
+    fit(data = train_knn)
+
+```
+```{r}
+#Making predictions:
+preds_knn <- predict(final_knn, test_knn)
+
+
+# Calculating performance metrics:
+performance_metrics(test_knn$log_price, test$price, preds_knn$.pred)
+```
+
+
+3. Lasso:
+
+Using the same initial split, but creating a different pre-processing recipe
+
+
+```{r}
+train_lasso <- training(data_split)
+test_lasso <- testing(data_split)
+
+```
+
+recipe:
+
+```{r}
+recipe_lasso <- train_lasso %>%
+  recipe(log_price ~ .) %>%
+  step_rm(longitude, latitude, amenities, price)%>%
+  step_dummy(all_nominal())
+```
+
+
+Lasso model, where the penalising parameter will be tuned using a grid search
+
+```{r}
+lasso <- linear_reg(mode = "regression", mixture = 1, penalty = tune())%>%
+  set_engine("glmnet")
+```
+
+Creating a workflow to streamline the process:
+```{r}
+library(workflows)
+workflow_lasso <- workflow() %>%
+    add_model(lasso) %>%
+    add_recipe(recipe_lasso)
+```
+
+Tuning the penalising parameter:
+```{r}
+library(tune)
+best_param <- workflow_lasso %>% 
+    tune_grid(resamples = vfold_cv(train, v = 5, strata = log_price, nbreaks = 5),
+              grid = tibble(penalty = 10^seq(-2, -1, length.out = 10)),
+              control = control_grid(verbose = FALSE, save_pred = TRUE),
+              metrics = metric_set(rmse))%>%
+    select_best("rmse")
+```
+
+Finalising model with optimal parameter:
+
+```{r}
+final_lasso <- finalize_workflow(workflow_lasso, best_param) %>%
+    fit(data = train_lasso)
+
+
+preds_lasso <- predict(final_lasso, test_lasso)
+
+Metrics::mape(test$log_price, preds_lasso$.pred)*100
+
+mean((exp(preds_lasso$.pred) - test$price)**2)**0.5
+Metrics::mape(test$price, exp(preds_lasso$.pred))*100
+
+performance_metrics(test_lasso$log_price, test$price, preds_lasso$.pred)
+```
+
+
+3. Gradient Descent:
+
+More broadly, optimisation strategies take a defined loss function $L(x, \ y, \ g)$ and an i.i.d sample from a probability model (X, y) ~ P and perform empirical risk minimisation, i.e.:
+$$min \frac{1}{n} \sum_{i=1}^n L(x_i, \ y_i, \ g) $$
+where g is the domain for optimisation, which in our case will be a parameter set.
+
+Gradient descent is an iterative optimisation method, where the loss function $L(X, y, g_\beta) = L(\beta)$ is expressed purely as a function of parameters we are trying to optimise, assuming the data is fixed. The procedure is as follows:
+
+1. Select an arbitrary parameter vector $\beta^0$ 
+
+2. Compute the gradient $\triangledown L(\beta^{(0)})$ of the loss function where each entry gives the partial derivative of the loss function with respect to each parameter.
+
+3. Update $\beta_0$ by taking a step in the direction of the steepest negative gradient (since we are trying to minimise the loss function), i.e.:
+$$\beta^{(1)} = \beta^{(0)} - \gamma_1\triangledown L(\beta^{(0)})$$ 
+where $\gamma_1$ is the step size. By continuity in smooth functions, there is always some step size small enough to not guarantee that the loss function decreases and does not overshoot the local minimum.
+
+In our implementation, we will attempt to find the optimal coefficients for the regression of price on a few variables. The loss function will be RSS.
+
+
+
+```{r}
+# Build a linear regression model with 3 predictors:
+lm_gs <- lm(log_price~ bedrooms + distance_to_malibu + has_balcony + has_pool, data = train)
+
+```
+
+Creating functions to compute the residual sum of squares and the gradient
+
+```{r}
+loss_calc <- function(x, y, coef) {
+  sum((y - x %*% coef)**2)
+}
+
+gradient_calc <- function(x, y, coef) {
+ -2 * t(x) %*% (y - x %*% coef)
+}
+```
+
+We will first check if the functions work:
+```{r}
+#Creating variables representing x and y
+X <- model.matrix(lm_gs)
+y <- train$log_price
+
+
+# Generating the same number of random betas as in the model matrix
+beta <- rnorm(ncol(model.matrix(lm_gs)))
+
+#Calculating loss
+loss_calc(X, y, beta)
+
+#Calculating gradient:
+gradient_calc(X, y, beta)
+```
+
+
+Creating a while loop that continues moving in the direction of steepest gradient anf updating the betas until the difference between the loss of $\beta^0$ and $\beta^1$ is 0.000001. It is important to check if the algorithms converges.
+
+Since the line search method of choosing a step size is not suitable for stochastic optimisation, we will be using the Barzilai-Borwein method of computing an appropriate step size.
+
+
+```{r}
+# Creating randomly generated coefficients as a starting point and computing loss and gradient
+coef_start <- rnorm(ncol(X))
+loss_start <- loss_calc(X, y, coef_start)
+gradient_start <- gradient_calc(X, y, coef_start)
+
+# Manually updating the starting coefficients:
+# Normalising the starting gradient vector since we are only interested in direction 
+coef_update_1 <- coef_start + 0.01 * gradient_start / sqrt(sum(gradient_start**2))
+loss_update_1 <- loss_calc(X, y, coef_update_1)
+gradient_update_1 <- gradient_calc(X, y, coef_update_1)
+
+
+# Creating a while loop that keeps updating as long as the difference between the start and updated loss function is above 0.000001
+
+while (abs(loss_start - loss_update_1) > 0.000001) {
+  
+  # Computing the Barzilai-Borwein step size:
+  step_size <- sum((coef_update_1 - coef_start) * (gradient_update_1 - gradient_start)) / sum((gradient_update_1 - gradient_start)**2)
+  
+  # Re-assigning the starting coefficient to be the updated coefficient
+  coef_start <- coef_update_1
+  coef_update_1 <- coef_update_1 - step_size * gradient_update_1
+  
+  # Re-assigning the starting gradient to be the gradient of the updated coefs
+  gradient_start <- gradient_update_1
+  gradient_update_1 <- gradient_calc(X, y, coef_update_1)  
+  
+  loss_start <- loss_update_1
+  loss_update_1 <- loss_calc(X, y, coef_update_1)
+  
+  print(loss_start)
+  
+}
+
+#Saving the final coefficients
+final_coef <- coef_update_1  
+```
+
+It can be seen that in the last few iterations, the loss change are very small, which indicates that the algorithm has converged (i.e. reached a local minimum, although a global minimum is not guaranteed).
+
+We will discard the magnitude of loss for now, since very few variables were used to make log price predictions.
+
+
+Comparing the coefficient estimates made by the OLS approach vs. using this implementation of gradient descent:
+
+```{r}
+data.frame(OLS_coefs = round(lm_gs$coefficients, 4),
+           GD_coefs = round(final_coef, 4))
+```
+
+The estimated coefficients are almost identical.
+
+
+
+
+
+4. Relatively high dimensional model:
+
+So far, we have mainly considered linear models. These types of models have short-comings due to the fact that the linearity assumption can often be a wrong one.
+
+Since the dataset does not contain many predictors relative to observations, we will utilise Generalised Additive Models (GAM) to include non-linear relationships between predictors and the response rather than using penalized regression.
+
+In summary, GAMs takes the following form:
+$$g(E[y|X]) = \beta_0 + f_1(x_1) + f_2(x_2) + .. + f_p(x_p)$$
+
+where $f_j$ for j = 1,..,p is some function space. Linear regression is a special case where $f_j(x_j) = \beta_jx_j$. In a way, this is a linear model where each coefficient is now replaced with a "univariate plot", so the relationship between a predictor and the response is summarised with a (smooth) function rather than a single number.
+
+The following methods will be used to fit an additive model through the gam() function:
+
+. Basis function approach: these models have the following general structure:
+$$y_i = \beta_0 + \beta_1b_1(x_i) + ... + \beta_Kb_K(x_i) + \epsilon_i$$
+where $b_k()$ are a family of known functions applied to a predictor variable.
+
+- Polynomial regression: uses higher degrees polynomials of a predicor variable to achieve a non-linear fit. The basis functions are $b_j(x_j) = x_i^j$.
+
+
+. Smoothing constraints approach:
+
+- Smoothing spline: Finding a function g(x) that both minimises the RSS and achieves a smooth fit:
+$$\sum_{i=1}^n(y_i - g(x_i))^2 + \lambda\int g{''(t)^2dt}$$
+
+where $\lambda\int g{''(t)^2dt}$ is the smoothing penalty term, where $\int g{''(t)^2dt}$ denotes the total variation in the slope of g(t) for all t. and $\lambda$ is the non-negative tuning parameter. If there was no penalty term, the g(x) function that achieve RSS=0 would be too flexible and overfit the data. 
+
+We also know that the g(x) that minimises the above expression is a natural (i.e. twice continuously differentiable) cubic spline with region boundaries (knots) at $x_1,...,x_n$. Although the "per-observation" knots result in high flexibility and hence many degrees of freedom, the EFFECTIVE degrees of freedom decrease in line with the size of $\lambda$. The optimal $\lambda$ will be computed using LOOCV, which is very efficient for smoothing splines.
+
+Note that categorical variables will simply be converted to dummies.
+
+
+Let's now inspect a few variables that could potentially benefit from a polynomial transformation. To decide on the degree, we will create several nested models and perform ANOVA to test the null hypothesis that a lower degree model can explain the variation in data vs. an alternative hypothesis that a higher degree model is needed at 1% significance level.:
+
+```{r}
+#beds: 3rd degree polynomial
+anova(lm(log_price ~ beds, train_gam),
+      lm(log_price ~ poly(beds, 2), train_gam),
+      lm(log_price ~ poly(beds, 3), train_gam),
+      lm(log_price ~ poly(beds, 4), train_gam))
+
+#distance to malibu: 4th degree is sufficient
+anova(lm(log_price ~ distance_to_malibu, train_gam),
+      lm(log_price ~ poly(distance_to_malibu, 2), train_gam),
+      lm(log_price ~ poly(distance_to_malibu, 3), train_gam),
+      lm(log_price ~ poly(distance_to_malibu, 4), train_gam),
+      lm(log_price ~ poly(distance_to_malibu, 5), train_gam))
+
+#maximum_nights: 3rd degree 
+anova(lm(log_price ~ maximum_nights, train_gam),
+      lm(log_price ~ poly(maximum_nights, 2), train_gam),
+      lm(log_price ~ poly(maximum_nights, 3), train_gam),
+      lm(log_price ~ poly(maximum_nights, 4), train_gam))
+```
+
+Pre-processing using a recipe
+
+```{r}
+#Creating training and testing sets  
+train_gam <- training(data_split)
+test_gam <- testing(data_split)
+
+#Pre-processing using recipes:
+recipe_gam <- train_gam %>%
+  recipe(log_price ~ .) %>%
+  step_rm(price, amenities, latitude, longitude, neighbourhood_group_cleansed, host_has_profile_pic)%>%
+  #Adding interaction terms
+  step_interact( ~ number_of_reviews:review_scores_rating) %>%
+  step_interact( ~ bathrooms:review_scores_cleanliness) %>% 
+  step_interact( ~ accommodates:bathrooms) %>% 
+  step_interact( ~ accommodates:bedrooms) %>%
+  step_interact( ~ accommodates:beds) %>% 
+  step_interact( ~ review_scores_cleanliness:review_scores_rating) %>%
+  #Creating dummies:
+  step_dummy(all_nominal())%>%
+  #Adding polynomial terms
+  #step_poly(beds, degree = 3) %>%
+  step_poly(maximum_nights, degree = 3)%>%
+  step_poly(distance_to_malibu, degree = 4)%>%
+  prep()
+
+#Preparing data
+train_gam <- juice(recipe_gam)
+test_gam <- bake(recipe_gam, test_gam)
+```
+
+
+
+
+gam() fits GAMs with smoothing splines through backfitting. This algorithm starts with an initial estimate for $\hat{f_j} $ and then iteratively update it by regressing the parital residual $r_j = y - \hat{\beta_0} - \sum_{k \neq j}\hat{f_k}x_k $ on $x_j$. The process is repeated until the estimates change by less than some stopping rule (i.e. convergence achieved).
+
+Before fitting the gam, we will apply the smoothing spline method to a few predictors using cross-validation to determine the optimal $\lambda$ and the corresponding degrees of freedom.
+
+```{r}
+
+
+fit_1 <- smooth.spline(train_gam$availability_365, train_gam$log_price, cv = T)
+fit_1$df
+
+fit_2 <- smooth.spline(train_gam$number_of_reviews, train_gam$log_price, cv = T)
+fit_2$df
+
+fit_3 <- smooth.spline(train_gam$host_response_rate, train_gam$log_price, cv = T)
+fit_3$df
+```
+
+
+
+```{r}
+library(gam)
+model_gam <- gam(terms(log_price~ . + s(availability_365, df = 78) + s(number_of_reviews, df = 7) + s(host_response_rate, df = 2), data = train_gam), data = train_gam)
+
+#Making predictions
+preds_gam <- predict(model_gam, test_gam)
+
+#Computing errors:
+performance_metrics(test_gam$log_price, test$price, preds_gam)
+
+```
+
+
+
+5. Neural Network:
+
+Explanation:
+For simplicity, the explanation will focus on a single hidden layer back-propagation perceptron. Neural network are a form of compositional non-linear models with two main stages. First, the input predictors $X \ = \ (X_1, X_2, ..., X_P)^T$, where p = 1,2,...,P is the number of predictors in the input layer, undergo linear transformation to form derived features $Z_m = (Z_1, Z_2,...,Z_M)^T$, where m = 1,2,..., M is the number of units in the hidden layer, as follows:
+$$Z_m = \sigma(\alpha_{0m} + X\alpha_m)$$
+$Z_m$ can be thought of as a basis expansion of the X inputs the parameters of which are tuned using data.
+
+Once these derived features are created and enter the hidden layer units, there are fed into the non-linear activation function $\sigma$ such as sigmoid, reLu or radial basis (among others). Upon exiting the hidden layer, $Z_m$ undergoes another series of linear transformations before entering the output layer:
+$$f_k(X) = g_k(\beta_{0k} + Z\beta_k) $$
+
+where k = 1,2,...,K is the number of units in the output layer. K=1 in regression problems.
+
+g is also an activation function which performs a non-linear transformation of the outputs of the hidden layer. In regression setting, g is usually the identity function, such that:
+$$g_k(\beta_{0k} + Z\beta_k) \ = \ \beta_{0k} + Z\beta_k$$
+In this case $\alpha_{0m}$ and $\beta_{0k}$ are the biases and $\alpha_m$ and $\beta_k$ are the weights. 
+
+Upon fitting the model, the weights are first set to random values close to zero, and are then updated using gradient descent (+ chain rule) in the process of back-propagation to minimise the RSS. Back-propagation is often a two-stage process whereby in the forward pass the predictions are made with current weights, and in the backward pass the errors are calculated. The magnitude of changes to the weights in response to these error is decided by the learning rate which should be selected carefully. 
+
+Mention how overparametrisation can lead to overfitting and can be controlled by adding a penalty term which shrinks some weights to zero / or early stopping.
+
+
+Preprocessing data:
+Categorical variables will be one-hot encoded and numeric variables will be scaled to have a mean of 0 and standard deviation of 1 (NNs are very sensitive to scaling since the scale of inputs affects the scale of weights). 
+Since the data has to be an unlabelled matrix, we will store price and log_price for future performance analysis.
+
+```{r}
+train_net <- training(data_split)
+test_net <- testing(data_split)
+
+#Storing the outcome variable in train data
+train_price <- train_net$price
+train_net_x <- select(train_net, -log_price)
+train_logprice <- train_net$log_price
+
+#Storing outcome variable in test data
+test_price <- test_net$price
+test_net_x <- select(test_net, -log_price)
+test_logprice <- test_net$log_price
+```
+
+
+Creating recipe:
+
+```{r}
+recipe_net <- train_net_x %>%
+  recipe() %>%
+  step_rm(longitude, latitude, amenities, price, host_since, host_response_time, host_response_rate, host_total_listings_count, host_has_profile_pic, neighbourhood_group_cleansed, bathrooms, has_availability, review_scores_rating, review_scores_accuracy, review_scores_communication, review_scores_value, reviews_per_month) %>%
+  step_center(all_numeric(), -c(has_kitchen, has_pool, has_tv, has_balcony, has_parking))%>%
+  step_scale(all_numeric(), -c(has_kitchen, has_pool, has_tv, has_balcony, has_parking))%>%
+  step_dummy(all_nominal())%>%
+  prep()
+```
+
+Applying the recipe to the train and test data:
+
+```{r}
+train_net_x <- as.matrix(juice(recipe_net))
+dimnames(train_net_x) <- NULL
+
+test_net_x <- recipe_net %>%
+  bake(test_net_x) %>%
+  as.matrix()
+dimnames(test_net_x) <- NULL
+```
+
+
+Designing the network architecture using the keras package:
+
+```{r}
+nnet <- keras_model_sequential()
+
+
+nnet %>%
+  layer_dense(280, activation = "relu", input_shape = ncol(train_net_x)) %>%
+  layer_dropout(rate = 0.1) %>%
+  layer_dense(1)
+
+#Summary of model:
+summary(nnet)
+nnet$input
+nnet$output
+```
+
+
+```{r}
+
+#Compiling model: uses customized adam as a stochastic optimiser:
+nnet %>% compile(optimizer = optimizer_sgd(learning_rate =0.001),
+                  loss = "mse")
+
+#Implementing early stopping so that the training stop if validation error does not decrease by more than 0.0001:
+callbacks <- list(callback_early_stopping(monitor = "val_loss", 
+                                          min_delta = 1e-4,
+                                          patience = 15,
+                                          verbose = 1,
+                                          mode = "min"))
+
+nnet %>% fit(train_net_x,
+              train_logprice, 
+              batch_size=11, 
+              epochs = 150,
+              callbacks = callbacks,
+              validation_split = 0.2,
+              shuffle=FALSE)
+
+
+preds_net <- predict(nnet, test_net_x)
+performance_metrics(test_logprice, test_price, preds_net)
+Metrics::mape(test_logprice, preds_net)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
